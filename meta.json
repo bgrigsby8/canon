@@ -1,0 +1,21 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "brad-grigsby:canon",
+  "visibility": "public",
+  "url": "https://github.com/bgrigsby8/canon",
+  "description": "Control a Canon camera over Canon's Camera Control API (CCAPI)",
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "bin/canon",
+  "first_run": "",
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ]
+  }
+}

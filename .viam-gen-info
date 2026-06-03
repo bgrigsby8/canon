@@ -1,0 +1,13 @@
+{
+  "module_name": "canon",
+  "visibility": "public",
+  "namespace": "brad-grigsby",
+  "language": "go",
+  "resource_type": "component",
+  "resource_subtype": "camera",
+  "model_name": "camera",
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2026-06-03T13:03:55.342613Z",
+  "module_readme_link": "README.md"
+}
