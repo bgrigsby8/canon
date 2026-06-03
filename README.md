@@ -25,17 +25,22 @@ This module provides the following model(s):
 
 ```json
 {
-  "ip_address": "192.168.1.142",
-  "port": "8080",
+  "ip_address": "10.1.2.105",
+  "use_https": true,
   "live_view_size": "medium"
 }
 ```
 
-| Name             | Type   | Inclusion | Description                                                      |
-|------------------|--------|-----------|------------------------------------------------------------------|
-| `ip_address`     | string | Required  | IP address the camera exposes its CCAPI server on.               |
-| `port`           | string | Optional  | CCAPI server port. Defaults to `8080`.                           |
-| `live_view_size` | string | Optional  | Live view resolution: `small` or `medium`. Defaults to `medium`. |
+| Name             | Type   | Inclusion | Description                                                                                 |
+|------------------|--------|-----------|---------------------------------------------------------------------------------------------|
+| `ip_address`     | string | Required  | IP address the camera exposes its CCAPI server on.                                          |
+| `use_https`      | bool   | Optional  | Connect over HTTPS. Required if the camera shows an `https://...` URL. Defaults to `false`. |
+| `port`           | string | Optional  | CCAPI server port. Defaults to `443` when `use_https` is set, otherwise `8080`.             |
+| `live_view_size` | string | Optional  | Live view resolution: `small` or `medium`. Defaults to `medium`.                            |
+
+> **HTTPS / self-signed certificate:** CCAPI's HTTPS mode uses a self-signed certificate. When
+> `use_https` is enabled, the module connects without verifying the certificate. If your camera
+> displays a URL like `https://10.1.2.105:443/ccapi`, set `use_https: true`.
 
 See [the model documentation](brad-grigsby_canon_camera.md) for the full list of
 `DoCommand` actions (`capture`, `list_contents`, `device_info`, and shooting settings).

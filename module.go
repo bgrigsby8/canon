@@ -11,6 +11,7 @@ package canon
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,7 +39,8 @@ var Camera = resource.NewModel("brad-grigsby", "canon", "camera")
 var errUnimplemented = errors.New("unimplemented")
 
 const (
-	defaultPort = "8080"
+	defaultHTTPPort  = "8080"
+	defaultHTTPSPort = "443"
 
 	// ccapiBase is the version-prefixed root of all CCAPI endpoints used here.
 	ccapiBase = "/ccapi/ver100"
@@ -67,19 +69,34 @@ func init() {
 type Config struct {
 	// IPAddress is the IP the camera exposes its CCAPI server on. Required.
 	IPAddress string `json:"ip_address"`
-	// Port is the CCAPI server port. Defaults to 8080 when omitted.
+	// Port is the CCAPI server port. Defaults to 443 when use_https is set, otherwise 8080.
 	Port string `json:"port,omitempty"`
+	// UseHTTPS connects over HTTPS. CCAPI's HTTPS mode uses a self-signed certificate, so
+	// enabling this also disables TLS certificate verification. Cameras that present a URL
+	// like "https://<ip>:443/ccapi" require this.
+	UseHTTPS bool `json:"use_https,omitempty"`
 	// LiveViewSize is the live view resolution requested from the camera: "small" or "medium".
 	// Defaults to "medium" when omitted.
 	LiveViewSize string `json:"live_view_size,omitempty"`
 }
 
-// port returns the configured CCAPI port or the CCAPI default.
-func (cfg *Config) port() string {
-	if cfg.Port == "" {
-		return defaultPort
+// scheme returns the URL scheme for the configured transport.
+func (cfg *Config) scheme() string {
+	if cfg.UseHTTPS {
+		return "https"
 	}
-	return cfg.Port
+	return "http"
+}
+
+// port returns the configured CCAPI port or the scheme-appropriate default.
+func (cfg *Config) port() string {
+	if cfg.Port != "" {
+		return cfg.Port
+	}
+	if cfg.UseHTTPS {
+		return defaultHTTPSPort
+	}
+	return defaultHTTPPort
 }
 
 // liveViewSize returns the configured live view size or the default.
@@ -139,14 +156,23 @@ func newCanonCamera(ctx context.Context, deps resource.Dependencies, rawConf res
 func NewCamera(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (camera.Camera, error) {
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	if conf.UseHTTPS {
+		// CCAPI's HTTPS mode presents a self-signed certificate, so verification must be skipped.
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // CCAPI uses a self-signed certificate
+		}
+		logger.Warn("connecting to CCAPI over HTTPS with TLS certificate verification disabled (self-signed certificate)")
+	}
+
 	c := &canonCamera{
 		Named:      name.AsNamed(),
 		logger:     logger,
 		cfg:        conf,
 		cancelCtx:  cancelCtx,
 		cancelFunc: cancelFunc,
-		baseURL:    fmt.Sprintf("http://%s:%s", conf.IPAddress, conf.port()),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		baseURL:    fmt.Sprintf("%s://%s:%s", conf.scheme(), conf.IPAddress, conf.port()),
+		httpClient: httpClient,
 	}
 	return c, nil
 }
