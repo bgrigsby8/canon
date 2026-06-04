@@ -10,9 +10,9 @@ available through `DoCommand`.
 
 ## Requirements
 
-- A Canon camera with CCAPI enabled. CCAPI must be activated on the camera (Canon enables
-  it on request for supported models) and the camera must be reachable over the network
-  from the machine running this module.
+- A Canon camera with CCAPI enabled and reachable over the network from the machine running
+  this module. Newer bodies (e.g. the EOS R5 Mark II) have CCAPI built into the menu; some
+  older bodies require a one-time activation over USB with Canon's CCAPI Activation Tool.
 
 ## Models
 
@@ -23,11 +23,11 @@ This module provides the following model(s):
 
 ## Configuration
 
+Most cameras work with just the IP address (plain HTTP on port 8080):
+
 ```json
 {
-  "ip_address": "10.1.2.105",
-  "use_https": true,
-  "live_view_size": "medium"
+  "ip_address": "10.1.2.105"
 }
 ```
 

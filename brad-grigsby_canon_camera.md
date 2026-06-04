@@ -12,18 +12,37 @@ stills and other camera controls are available through `DoCommand`.
 
 ## Requirements
 
-- A Canon camera with CCAPI enabled and reachable over the network. CCAPI must be
-  activated on the camera (Canon provides it on request for supported models) and the
-  camera connected to the same network as the machine running this module.
+- A Canon camera with CCAPI enabled and on the same network as the machine running this
+  module. Newer bodies (e.g. the EOS R5 Mark II) have CCAPI built into the menu; some older
+  bodies require a one-time activation over USB with Canon's CCAPI Activation Tool.
+
+## Connecting
+
+The module does not block on the camera at startup. A background loop continuously probes
+the camera and heartbeats so a camera that drops off (power save / sleep / weak Wi-Fi) is
+detected and reconnected automatically when it returns. Live view is started on demand the
+first time a frame is requested.
+
+Some bodies show a one-time connection-permission prompt on the camera screen the first
+time a client connects — approve it if it appears. (Many models, including the EOS R5
+Mark II, connect without prompting.)
+
+Tips for a stable connection:
+
+- **Disable the camera's auto power-off and Wi-Fi/communication power-saving.** This is the
+  most common cause of the connection dropping: an idle Canon body drops off the network
+  (probes then fail with `no route to host`). The module reconnects automatically when it
+  returns, but a body that stays awake is far more reliable.
+- Use `{"status": true}` via `DoCommand` to check the current session state. When
+  disconnected, the response includes a `last_error` field showing why.
 
 ## Configuration
 
+Most cameras work with just the IP address (plain HTTP on port 8080):
+
 ```json
 {
-  "ip_address": "10.1.2.105",
-  "use_https": true,
-  "port": "443",
-  "live_view_size": "medium"
+  "ip_address": "10.1.2.105"
 }
 ```
 
@@ -42,7 +61,7 @@ stills and other camera controls are available through `DoCommand`.
 
 ### Example Configuration
 
-For a camera offering `https://10.1.2.105:443/ccapi`:
+For a camera configured for HTTPS (e.g. one offering `https://10.1.2.105:443/ccapi`):
 
 ```json
 {
@@ -55,6 +74,33 @@ For a camera offering `https://10.1.2.105:443/ccapi`:
 
 Any combination of the following commands may be sent in a single `DoCommand` call;
 each result is keyed by its command name.
+
+### status
+
+Report whether the module currently has a working CCAPI session. Useful as a health check
+from the control tab without actuating the shutter.
+
+```json
+{ "status": true }
+```
+
+Response:
+
+```json
+{ "status": { "connected": true, "base_url": "http://10.1.2.105:8080" } }
+```
+
+When disconnected, `last_error` explains why:
+
+```json
+{
+  "status": {
+    "connected": false,
+    "base_url": "http://10.1.2.105:8080",
+    "last_error": "Get \"http://10.1.2.105:8080/ccapi/ver100/deviceinformation\": dial tcp 10.1.2.105:8080: connect: no route to host"
+  }
+}
+```
 
 ### capture
 

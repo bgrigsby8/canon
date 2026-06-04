@@ -132,10 +132,16 @@ type canonCamera struct {
 
 	cancelCtx  context.Context
 	cancelFunc func()
+	activeBkgd sync.WaitGroup
 
-	// mu guards liveViewStarted, which tracks whether we've already asked the camera to begin live view.
-	mu              sync.Mutex
+	// mu guards the mutable session state below.
+	mu sync.Mutex
+	// liveViewStarted tracks whether we've already asked the camera to begin live view.
 	liveViewStarted bool
+	// connected reflects whether the background loop currently reaches the camera's CCAPI server.
+	connected bool
+	// lastErr is the most recent connection error, surfaced by the status command ("" when connected).
+	lastErr string
 }
 
 // contentList is the shape CCAPI uses to return lists of storage devices, directories, and files.
@@ -151,19 +157,22 @@ func newCanonCamera(ctx context.Context, deps resource.Dependencies, rawConf res
 	return NewCamera(ctx, deps, rawConf.ResourceName(), conf, logger)
 }
 
-// NewCamera constructs a Canon CCAPI camera. It does not contact the camera; the connection is
-// established lazily on the first request so a temporarily unreachable camera doesn't block startup.
+// NewCamera constructs a Canon CCAPI camera. It returns immediately without blocking on the camera:
+// a background loop establishes and maintains the CCAPI session (see connectLoop), so a camera that
+// is unreachable or asleep at startup doesn't fail construction and is picked up once it's available.
 func NewCamera(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (camera.Camera, error) {
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	// CCAPI is an embedded HTTP server that drops idle connections after a few seconds. Reusing a
+	// pooled keep-alive connection therefore hangs the next request until it times out, so we open a
+	// fresh connection per request.
+	transport := &http.Transport{DisableKeepAlives: true}
 	if conf.UseHTTPS {
 		// CCAPI's HTTPS mode presents a self-signed certificate, so verification must be skipped.
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // CCAPI uses a self-signed certificate
-		}
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // CCAPI uses a self-signed certificate
 		logger.Warn("connecting to CCAPI over HTTPS with TLS certificate verification disabled (self-signed certificate)")
 	}
+	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: transport}
 
 	c := &canonCamera{
 		Named:      name.AsNamed(),
@@ -174,7 +183,93 @@ func NewCamera(ctx context.Context, deps resource.Dependencies, name resource.Na
 		baseURL:    fmt.Sprintf("%s://%s:%s", conf.scheme(), conf.IPAddress, conf.port()),
 		httpClient: httpClient,
 	}
+
+	c.activeBkgd.Add(1)
+	go c.connectLoop()
+
 	return c, nil
+}
+
+// --- connection management ---
+
+const (
+	// connectRetryInterval is how long to wait between connection attempts while the camera is unreachable.
+	connectRetryInterval = 5 * time.Second
+	// heartbeatInterval is how often to re-probe the camera once connected, to detect a camera that has
+	// dropped off (power save, sleep, etc.).
+	heartbeatInterval = 45 * time.Second
+	// probeTimeout bounds a single reachability probe so a hung or unreachable camera is reflected in
+	// the connection state within seconds rather than waiting on the full client timeout.
+	probeTimeout = 8 * time.Second
+)
+
+// connectLoop runs in the background for the lifetime of the component. It probes the camera until
+// CCAPI responds (the first probe is what prompts the on-camera approval), then heartbeats so a
+// camera that drops off (power save, sleep, weak Wi-Fi) is detected and reconnected when it returns.
+// Live view is started lazily by Images rather than held open here.
+func (c *canonCamera) connectLoop() {
+	defer c.activeBkgd.Done()
+	for {
+		err := c.probe(c.cancelCtx)
+		c.updateConnection(err)
+
+		wait := connectRetryInterval
+		if err == nil {
+			wait = heartbeatInterval
+		}
+		select {
+		case <-c.cancelCtx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
+}
+
+// probe makes a single bounded reachability request to the camera. The first successful probe is also
+// what dismisses the camera's "waiting to connect" prompt (after on-camera approval).
+func (c *canonCamera) probe(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	return c.getJSON(ctx, deviceInfoPath, nil)
+}
+
+// updateConnection records the result of a probe, surfacing the last error for the status command and
+// logging connection state transitions so they're visible without debug logging. Losing the connection
+// clears liveViewStarted so live view is restarted on the next Images call once the camera is back.
+func (c *canonCamera) updateConnection(err error) {
+	c.mu.Lock()
+	was := c.connected
+	c.connected = err == nil
+	if err != nil {
+		c.lastErr = err.Error()
+		c.liveViewStarted = false
+	} else {
+		c.lastErr = ""
+	}
+	c.mu.Unlock()
+
+	switch {
+	case err == nil && !was:
+		c.logger.Infof("connected to Canon camera at %s", c.baseURL)
+	case err != nil && was:
+		c.logger.Warnf("lost connection to Canon camera at %s: %v", c.baseURL, err)
+	case err != nil:
+		c.logger.Debugf("camera not reachable, retrying in %s: %v", connectRetryInterval, err)
+	}
+}
+
+// isConnected reports whether the background loop currently reaches the camera's CCAPI server.
+func (c *canonCamera) isConnected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connected
+}
+
+// lastError returns the most recent connection error, or "" if the last probe succeeded.
+func (c *canonCamera) lastError() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastErr
 }
 
 // --- low-level CCAPI helpers ---
@@ -423,8 +518,20 @@ func (c *canonCamera) Geometries(ctx context.Context, extra map[string]any) ([]s
 //	{"get_settings": true}                                 -> {all shooting settings}
 //	{"get_setting": "av"}                                  -> {value, ability} for one setting
 //	{"set_setting": {"setting": "av", "value": "f4.0"}}    -> "ok"
+//	{"status": true}                                       -> {"connected": bool, "base_url": "..."}
 func (c *canonCamera) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	resp := map[string]any{}
+
+	if _, ok := cmd["status"]; ok {
+		status := map[string]any{
+			"connected": c.isConnected(),
+			"base_url":  c.baseURL,
+		}
+		if lastErr := c.lastError(); lastErr != "" {
+			status["last_error"] = lastErr
+		}
+		resp["status"] = status
+	}
 
 	if raw, ok := cmd["capture"]; ok {
 		autofocus := false
@@ -500,14 +607,15 @@ func (c *canonCamera) DoCommand(ctx context.Context, cmd map[string]any) (map[st
 	}
 
 	if len(resp) == 0 {
-		return nil, errors.New("no recognized command; supported: capture, list_contents, device_info, get_settings, get_setting, set_setting")
+		return nil, errors.New("no recognized command; supported: capture, list_contents, device_info, get_settings, get_setting, set_setting, status")
 	}
 	return resp, nil
 }
 
-// Close cancels background work and best-effort stops the camera's live view.
+// Close stops the background connection loop and best-effort stops the camera's live view.
 func (c *canonCamera) Close(ctx context.Context) error {
 	c.cancelFunc()
+	c.activeBkgd.Wait()
 
 	c.mu.Lock()
 	started := c.liveViewStarted
